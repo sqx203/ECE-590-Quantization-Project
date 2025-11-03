@@ -197,18 +197,9 @@ def measure_model_stats(model, name="model"):
     return total_params, size_mb
 
 def main():
+  # Build PTQ model
     torch.manual_seed(SEED)
     models = model_loader.preload_models(DEVICE)
-    # Baseline
-    print("Running baseline inference …")
-    imgs_base = pipeline.generate(PROMPTS, models=models, seed=SEED, n_inference_steps=N_STEPS, sampler=SAMPLER, device=DEVICE)
-    base_paths = save_images(imgs_base, "base")
-    # Record stats baseline
-    unet_base = models["diffusion"]
-    params_base, size_base = measure_model_stats(unet_base)
-    print(f"Baseline UNet params: {params_base}, size {size_base/1e6:.2f} MB")
-
-    # Build PTQ model
     print("Building PTQ model …")
     unet_q = build_ptq_model(models["diffusion"], DEVICE) #pipeline.generate() 会“自动补齐”缺的子模型，所以能跑整条流水线
 #     在 pipeline.generate() 里，每个子模型都是这样取的：
@@ -219,47 +210,7 @@ def main():
 # 你传 models={"diffusion": prepared}：只把 U-Net/diffusion 换成你给的 prepared（带 observer）。
 # 其它 clip/encoder/decoder 都会由 model_loader 自动按需加载成 FP32。
 # generate() 还会创建噪声、做 tokenization → CLIP → 采样器循环（timestep / time_embedding）→ 调 diffusion → 调 decoder → 得到图像。
-    models_ptq = models.copy()
-    models_ptq["diffusion"] = unet_q
-    params_ptq, size_ptq = measure_model_stats(unet_q)
-    print(f"PTQ UNet params: {params_ptq}, size {size_ptq/1e6:.2f} MB")
-
-    # PTQ inference & time
-    print("Running PTQ inference …")
-    t0 = time.time()
-    imgs_ptq = pipeline.generate(PROMPTS, models=models_ptq, seed=SEED, n_inference_steps=N_STEPS, sampler=SAMPLER, device=DEVICE)
-    t1 = time.time()
-    ptq_time = (t1 - t0) / len(PROMPTS)
-    print(f"PTQ avg time per prompt: {ptq_time:.2f}s")
-    ptq_paths = save_images(imgs_ptq, "ptq")
-
-    # 计算指标
-    print("Computing metrics …")
-    # Load images as tensors
-    base_tensors = torch.cat([load_image_tensor(p) for p in base_paths], dim=0).to(DEVICE)
-    ptq_tensors = torch.cat([load_image_tensor(p) for p in ptq_paths], dim=0).to(DEVICE)
-
-    # LPIPS
-    lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).to(DEVICE)
-    lpips_val = lpips_metric(ptq_tensors, base_tensors)
-    # SSIM
-    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(DEVICE)
-    ssim_val = ssim_metric(ptq_tensors, base_tensors)
-
-    print(f"LPIPS (PTQ vs Base): {lpips_val.item():.4f}")
-    print(f"SSIM  (PTQ vs Base): {ssim_val.item():.4f}")
-
-    # 写入 Markdown 报告
-    report = OUTPUT_DIR / "report_ptq.md"
-    with open(report, "w") as f:
-        f.write("# PTQ Experiment Report\n\n")
-        f.write(f"- Baseline UNet params: {params_base}, size: {size_base/1e6:.2f} MB\n")
-        f.write(f"- PTQ    UNet params: {params_ptq}, size: {size_ptq/1e6:.2f} MB\n")
-        f.write(f"- PTQ avg inference time per prompt: {ptq_time:.2f} s\n\n")
-        f.write("## Metrics (PTQ vs Baseline)\n")
-        f.write(f"- LPIPS: {lpips_val.item():.4f}\n")
-        f.write(f"- SSIM : {ssim_val.item():.4f}\n")
-    print(f"Report saved to {report}")
-
+    torch.save(unet_q.state_dict(), "diffusion_int8.pt")
+    print("Saved quantized model to ckpt/diffusion_int8.pt")
 if __name__ == "__main__":
     main()
